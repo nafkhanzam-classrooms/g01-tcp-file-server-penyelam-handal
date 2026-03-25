@@ -7,6 +7,8 @@ HOST = "0.0.0.0"
 PORT = 15579
 SERVER_DIR = "./server_files"
 BUFFER_SIZE = 4096
+CLIENTS = set()
+CLIENTS_LOCK = threading.Lock()
 
 
 def format_size_notation(file_size):
@@ -29,6 +31,35 @@ def format_size_notation(file_size):
 
 def send_line(conn, text):
 	conn.sendall(f"{text}\n".encode())
+
+
+def add_client(conn):
+	with CLIENTS_LOCK:
+		CLIENTS.add(conn)
+
+
+def remove_client(conn):
+	with CLIENTS_LOCK:
+		CLIENTS.discard(conn)
+
+
+def broadcast_to_others(sender_conn, text):
+	message = f"BROADCAST {text}"
+	failed = []
+
+	with CLIENTS_LOCK:
+		targets = [conn for conn in CLIENTS if conn is not sender_conn]
+
+	for conn in targets:
+		try:
+			send_line(conn, message)
+		except OSError:
+			failed.append(conn)
+
+	for conn in failed:
+		remove_client(conn)
+
+	return len(targets) - len(failed)
 
 
 def recv_line(conn, buffer):
@@ -161,7 +192,7 @@ def handle_client(conn, addr):
 	print(f"Client connected: {addr}")
 	send_line(
 		conn,
-		"Welcome to File Server, available commands: /list, /upload <filename>, /download <filename> <save_path>",
+		"Welcome to File Server, available commands: /list, /upload <filename>, /download <filename> <save_path>, /broadcast <message>",
 	)
 	buffer = b""
 
@@ -206,12 +237,22 @@ def handle_client(conn, addr):
 					continue
 				buffer = handle_download(conn, filename, buffer)
 
+			elif message.startswith("/broadcast "):
+				broadcast_message = message.split(" ", 1)[1].strip()
+				if not broadcast_message:
+					send_line(conn, "ERR: Invalid broadcast command. Usage: /broadcast <message>")
+					continue
+
+				sent_count = broadcast_to_others(conn, f"from {addr}: {broadcast_message}")
+				send_line(conn, f"OK: broadcast sent to {sent_count} client(s).")
+
 			else:
 				send_line(conn, "ERR: Unknown command. Please check your input.")
 
 	except Exception as exc:
 		print(f"Error handling client {addr}: {exc}")
 	finally:
+		remove_client(conn)
 		conn.close()
 
 
@@ -238,6 +279,7 @@ def main():
 				continue
 
 			worker = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
+			add_client(conn)
 			worker.start()
 			workers.append(worker)
 

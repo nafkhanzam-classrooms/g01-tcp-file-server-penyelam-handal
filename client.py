@@ -1,8 +1,10 @@
 import socket
 import os
+import select
+import sys
 
-HOST        = '127.0.0.1'
-PORT        = 15579
+HOST = '127.0.0.1'
+PORT = 15579
 BUFFER_SIZE = 4096
 
 
@@ -10,6 +12,7 @@ def strip_wrapping_quotes(text):
     if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'", '`'):
         return text[1:-1]
     return text
+
 
 def send_line(sock, text):
     sock.sendall(f'{text}\n'.encode())
@@ -45,50 +48,87 @@ def recv_exact(sock, size, buffer):
     return b''.join(chunks), buffer
 
 
+def recv_non_broadcast_line(sock, buffer):
+    while True:
+        line, buffer = recv_line(sock, buffer)
+        if line is None:
+            return None, buffer
+
+        if line.startswith('BROADCAST '):
+            print(f'\n{line}')
+            continue
+
+        return line, buffer
+
+
+def process_idle_server_message(sock, buffer):
+    line, buffer = recv_line(sock, buffer)
+    if line is None:
+        print('\nDisconnected from server.')
+        return buffer, False
+
+    if line.startswith('BROADCAST '):
+        print(f'\n{line}')
+        return buffer, True
+
+    if line.startswith('LIST '):
+        try:
+            payload_size = int(line.split(' ', 1)[1])
+            payload, buffer = recv_exact(sock, payload_size, buffer)
+            print('\n[Server LIST]')
+            print(payload.decode(errors='replace'))
+            return buffer, True
+        except ValueError:
+            pass
+
+    print(f'\n{line}')
+    return buffer, True
+
+
 def list_files(sock, buffer):
     send_line(sock, '/list')
-    response, buffer = recv_line(sock, buffer)
+    response, buffer = recv_non_broadcast_line(sock, buffer)
     if response is None:
         print('Disconnected from server.')
-        return buffer
+        return buffer, False
 
     if response.startswith('LIST '):
         try:
             payload_size = int(response.split(' ', 1)[1])
         except ValueError:
             print('Invalid response from server.')
-            return buffer
+            return buffer, True
 
         payload, buffer = recv_exact(sock, payload_size, buffer)
         response = payload.decode(errors='replace')
 
     print('Files in server:')
     print(response)
-    return buffer
+    return buffer, True
 
 
 def upload(sock, filepath, buffer):
     if not os.path.exists(filepath):
         print('File does not exist.')
-        return buffer
-    
+        return buffer, True
+
     file_size = os.path.getsize(filepath)
     filename = os.path.basename(filepath)
 
     send_line(sock, f'/upload {filename}')
 
-    status, buffer = recv_line(sock, buffer)
+    status, buffer = recv_non_broadcast_line(sock, buffer)
     if status != 'READY_FOR_SIZE':
         print(status or 'Server did not respond for upload.')
-        return buffer
+        return buffer, status is not None
 
     send_line(sock, str(file_size))
 
-    ack, buffer = recv_line(sock, buffer)
+    ack, buffer = recv_non_broadcast_line(sock, buffer)
     if ack != 'READY_FOR_UPLOAD':
         print(ack or 'Server is not ready for upload.')
-        return buffer
-    
+        return buffer, ack is not None
+
     print(f'Uploading {filepath} ({file_size} bytes)...')
 
     with open(filepath, 'rb') as f:
@@ -98,38 +138,38 @@ def upload(sock, filepath, buffer):
                 break
             sock.sendall(chunk)
 
-    status, buffer = recv_line(sock, buffer)
+    status, buffer = recv_non_broadcast_line(sock, buffer)
     if status is None:
         print('Disconnected from server after upload.')
-        return buffer
+        return buffer, False
 
     print(status)
-    return buffer
+    return buffer, True
 
 
 def download(sock, filename, save_path, buffer):
     send_line(sock, f'/download {filename}')
-    response, buffer = recv_line(sock, buffer)
+    response, buffer = recv_non_broadcast_line(sock, buffer)
     if response is None:
         print('Disconnected from server.')
-        return buffer
+        return buffer, False
 
     if response.startswith('ERR'):
         print(response)
-        return buffer
+        return buffer, True
 
     if not response.startswith('SIZE '):
         print('Invalid response from server.')
-        return buffer
-    
+        return buffer, True
+
     try:
         file_size = int(response.split(' ', 1)[1])
     except ValueError:
         print('Invalid response from server.')
-        return buffer
+        return buffer, True
 
     send_line(sock, 'READY_FOR_DOWNLOAD')
-    
+
     print(f'Downloading {filename} ({file_size} bytes)...')
 
     data, buffer = recv_exact(sock, file_size, buffer)
@@ -152,7 +192,19 @@ def download(sock, filename, save_path, buffer):
     else:
         print(f'File download incomplete: expected {file_size} bytes, received {received} bytes')
 
-    return buffer
+    return buffer, True
+
+
+def broadcast(sock, message, buffer):
+    send_line(sock, f'/broadcast {message}')
+    response, buffer = recv_non_broadcast_line(sock, buffer)
+    if response is None:
+        print('Disconnected from server.')
+        return buffer, False
+
+    print(response)
+    return buffer, True
+
 
 def main():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -163,19 +215,52 @@ def main():
         welcome, buffer = recv_line(sock, buffer)
         if welcome:
             print(welcome)
-            print()
 
         while True:
-            command = input('\n> ').strip()
+            sys.stdout.write('\n> ')
+            sys.stdout.flush()
+
+            command = None
+            while command is None:
+                readable, _, _ = select.select([sock, sys.stdin], [], [])
+
+                if sock in readable:
+                    buffer, connected = process_idle_server_message(sock, buffer)
+                    if not connected:
+                        return
+                    sys.stdout.write('\n> ')
+                    sys.stdout.flush()
+
+                if sys.stdin in readable:
+                    command = sys.stdin.readline()
+                    if command == '':
+                        return
+                    command = command.strip()
+
             if command == '/exit':
                 break
-            elif command == '/list':
-                buffer = list_files(sock, buffer)
-            elif command.startswith('/upload '):
+            if command == '/list':
+                buffer, ok = list_files(sock, buffer)
+                if not ok:
+                    break
+                continue
+            if command.startswith('/broadcast '):
+                message = command[len('/broadcast '):].strip()
+                if not message:
+                    print('Invalid broadcast command. Usage: /broadcast <message>')
+                    continue
+                buffer, ok = broadcast(sock, message, buffer)
+                if not ok:
+                    break
+                continue
+            if command.startswith('/upload '):
                 _, filepath = command.split(' ', 1)
                 filepath = strip_wrapping_quotes(filepath.strip())
-                buffer = upload(sock, filepath, buffer)
-            elif command.startswith('/download '):
+                buffer, ok = upload(sock, filepath, buffer)
+                if not ok:
+                    break
+                continue
+            if command.startswith('/download '):
                 remainder = command[len('/download '):].strip()
                 if ' ' not in remainder:
                     print('Invalid download command. Usage: /download <filename> <save_path>')
@@ -186,9 +271,13 @@ def main():
                 if not filename or not save_path:
                     print('Invalid download command. Usage: /download <filename> <save_path>')
                     continue
-                buffer = download(sock, filename, save_path, buffer)
-            else:
-                print('Unknown command. Use /list, /upload, /download, or /exit.')
+                buffer, ok = download(sock, filename, save_path, buffer)
+                if not ok:
+                    break
+                continue
+
+            print('Unknown command. Use /list, /upload, /download, /broadcast, or /exit.')
+
 
 if __name__ == '__main__':
     main()

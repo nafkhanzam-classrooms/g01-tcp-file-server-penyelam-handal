@@ -47,6 +47,16 @@ def queue_bytes(client, data):
 	client["out_buffer"] += data
 
 
+def queue_broadcast_to_others(clients, sender_sock, text):
+	count = 0
+	for sock, client in clients.items():
+		if sock is sender_sock:
+			continue
+		queue_line(client, f"BROADCAST {text}")
+		count += 1
+	return count
+
+
 def get_peer_name(sock):
 	try:
 		return sock.getpeername()
@@ -80,7 +90,7 @@ def close_client(sock, clients, fd_map, poller):
 	sock.close()
 
 
-def handle_command_line(client, line):
+def handle_command_line(client, clients, line):
 	addr = client["addr"]
 
 	if line == "/list":
@@ -142,10 +152,24 @@ def handle_command_line(client, line):
 		print(f"Download request from {addr}: {line}")
 		return
 
+	if line.startswith("/broadcast "):
+		broadcast_message = line.split(" ", 1)[1].strip()
+		if not broadcast_message:
+			queue_line(client, "ERR: Invalid broadcast command. Usage: /broadcast <message>")
+			return
+
+		sent_count = queue_broadcast_to_others(
+			clients,
+			client["sock"],
+			f"from {addr}: {broadcast_message}",
+		)
+		queue_line(client, f"OK: broadcast sent to {sent_count} client(s).")
+		return
+
 	queue_line(client, "ERR: Unknown command. Please check your input.")
 
 
-def process_client_buffer(client):
+def process_client_buffer(client, clients):
 	addr = client["addr"]
 
 	while True:
@@ -161,7 +185,7 @@ def process_client_buffer(client):
 				continue
 
 			print(f"Received from {addr}: {line}")
-			handle_command_line(client, line)
+			handle_command_line(client, clients, line)
 			continue
 
 		if client["state"] == "WAIT_UPLOAD_SIZE":
@@ -308,7 +332,7 @@ def main():
 						}
 						queue_line(
 							clients[conn],
-							"Welcome to File Server, available commands: /list, /upload <filename>, /download <filename> <save_path>",
+							"Welcome to File Server, available commands: /list, /upload <filename>, /download <filename> <save_path>, /broadcast <message>",
 						)
 						update_interest(poller, conn, clients[conn])
 						print(f"Client connected: {addr}")
@@ -337,7 +361,7 @@ def main():
 						continue
 
 					client["in_buffer"] += data
-					process_client_buffer(client)
+					process_client_buffer(client, clients)
 
 				if event & select.POLLOUT:
 					flush_outgoing(sock, client)
