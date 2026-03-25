@@ -1,11 +1,30 @@
 import os
 import select
 import socket
+import math
 
 HOST = "0.0.0.0"
 PORT = 15579
 SERVER_DIR = "./server_files"
 BUFFER_SIZE = 4096
+
+
+def format_size_notation(file_size):
+	units = ["B", "KB", "MB", "GB", "TB"]
+	value = float(file_size) if file_size > 0 else 0.0
+	unit_index = 0
+
+	while value >= 1000 and unit_index < len(units) - 1:
+		value /= 1024
+		unit_index += 1
+
+	value = math.ceil(value * 100) / 100
+
+	if value >= 1000 and unit_index < len(units) - 1:
+		value = math.ceil((value / 1024) * 100) / 100
+		unit_index += 1
+
+	return f"{value:.2f} {units[unit_index]}"
 
 
 def check_dir():
@@ -65,8 +84,19 @@ def handle_command_line(client, line):
 	addr = client["addr"]
 
 	if line == "/list":
-		files = os.listdir(SERVER_DIR)
-		response = "\n".join(files) if files else "There is no file in server."
+		files = []
+		for name in os.listdir(SERVER_DIR):
+			path = os.path.join(SERVER_DIR, name)
+			if os.path.isfile(path):
+				size = os.path.getsize(path)
+				files.append((format_size_notation(size), name))
+		if files:
+			width = max(len(size_text) for size_text, _ in files)
+			response = "\n".join(
+				f"{size_text:<{width}}    {name}" for size_text, name in files
+			)
+		else:
+			response = "There is no file in server."
 		payload = response.encode()
 		queue_line(client, f"LIST {len(payload)}")
 		queue_bytes(client, payload)
