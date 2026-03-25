@@ -22,6 +22,7 @@ Fitur utama:
 - `/list`: meminta daftar file yang tersedia di folder server.
 - `/upload <filepath>`: mengunggah file lokal ke server.
 - `/download <filename> <save_path>`: mengunduh file dari server ke path lokal.
+- `/broadcast <message>`: mengirim pesan broadcast ke semua client lain yang sedang terhubung.
 - `/exit`: keluar dari client.
 
 Alur protokol client:
@@ -51,6 +52,8 @@ Struktur fungsinya sama dengan *server-sync* (`send_line`, `recv_line`, `recv_ex
 - Saat `KeyboardInterrupt`, server ditutup lalu thread-thread yang masih aktif di-*join* dengan timeout.
 
 Dengan begitu, alur command per client tetap sama seperti sync, tetapi diproses di thread terpisah.
+
+Selain command file transfer, pada server multi-client (`server-thread.py`, `server-select.py`, `server-poll.py`) juga ditambahkan handler `/broadcast <message>` untuk mengirim pesan ke semua client lain yang sedang aktif.
 
 ### 4. server-select.py
 Server ini memakai event loop non-blocking berbasis `select.select()`.
@@ -108,6 +111,11 @@ State machine command upload/download/list pada `server-poll.py` sama dengan ver
 	- Client: `READY_FOR_DOWNLOAD`
 	- Server: kirim byte file
 
+4. Broadcast pesan (khusus server multi-client)
+	- Client pengirim: `/broadcast <message>`
+	- Server: kirim `BROADCAST ...` ke semua client lain
+	- Server ke pengirim: `OK: broadcast sent to <N> client(s).`
+
 ### Keamanan dan Validasi Dasar
 - Nama file disanitasi agar tidak bisa mengakses path di luar folder server.
 - Ukuran file divalidasi saat upload.
@@ -128,4 +136,7 @@ State machine command upload/download/list pada `server-poll.py` sama dengan ver
 
 ### server-thread.py
 ![server-thread](assets/server-thread.png)
+
+### broadcast
+![broadcast](assets/broadcast.png)
 
